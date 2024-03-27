@@ -1,7 +1,6 @@
 package org.example;
 
 import java.util.Collections;
-import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -16,7 +15,6 @@ import org.example.internal.NArgsCacheKey;
 import org.openjdk.jmh.annotations.*;
 import org.openjdk.jmh.infra.Blackhole;
 import org.openjdk.jmh.profile.GCProfiler;
-import org.openjdk.jmh.profile.JavaFlightRecorderProfiler;
 import org.openjdk.jmh.results.format.ResultFormatType;
 import org.openjdk.jmh.runner.Runner;
 import org.openjdk.jmh.runner.RunnerException;
@@ -32,10 +30,10 @@ import io.micrometer.core.instrument.config.MeterFilterReply;
 
 @Fork(1)
 @Measurement(iterations = 2, time = 5)
-@Warmup(iterations = 1, time = 2)
+@Warmup(iterations = 2, time = 2)
 @BenchmarkMode(Mode.AverageTime)
 @OutputTimeUnit(TimeUnit.NANOSECONDS)
-@Threads(8)
+// @Threads(4)
 public class Comparison {
 
     private static final Tags COMMON_TAGS = Tags.of("application", "abcservice", "az", "xyz", "environment",
@@ -49,6 +47,11 @@ public class Comparison {
     private static final String METER_NAME = "counter";
     private static final String TAG_KEY_1 = "tag-key-1";
     private static final String TAG_KEY_2 = "tag-key-2";
+    private static final String STATIC_TAG = "static-tag";
+    private static final String STATIC_VALUE = "static-value";
+    private static final Meter.MeterProvider<Counter> counterProvider = Counter.builder(METER_NAME)
+            .tag(STATIC_TAG, STATIC_VALUE)
+            .withRegistry(Metrics.globalRegistry);
 
     static {
         Metrics.globalRegistry.config().meterFilter(new MeterFilter() {
@@ -86,29 +89,31 @@ public class Comparison {
     public void recordWithoutCache(Blackhole bh, DataProvider dataProvider) {
         String dynamicValue = dataProvider.iterator.next();
         Counter.builder(Comparison.METER_NAME)
-                .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue)
+                .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue, STATIC_TAG, STATIC_VALUE)
                 .register(Metrics.globalRegistry).increment();
     }
 
     @Benchmark
     public void recordWithCacheUsingTags(Blackhole bh, DataProvider dataProvider) {
         String dynamicValue = dataProvider.iterator.next();
-        final Tags key = Tags.of(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue);
+        final Tags key = Tags.of(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue, STATIC_TAG, STATIC_VALUE);
         getOrCreateMeter(cacheWithTags, key,
                 k -> Counter.builder(
                                 Comparison.METER_NAME)
                         .tags(key)
                         .register(Metrics.globalRegistry)).increment();
+        bh.consume(key);
     }
 
     @Benchmark
     public void recordWithCacheUsingId(Blackhole bh, DataProvider dataProvider) {
         String dynamicValue = dataProvider.iterator.next();
         final Meter.Id key = new Meter.Id(Comparison.METER_NAME, Tags.of(TAG_KEY_1, dynamicValue, TAG_KEY_2,
-                dynamicValue), null, null, Meter.Type.COUNTER);
+                dynamicValue, STATIC_TAG, STATIC_VALUE), null, null, Meter.Type.COUNTER);
         getOrCreateMeter(cacheWithId, key, k -> Counter.builder(Comparison.METER_NAME)
                 .tags(key.getTags())
                 .register(Metrics.globalRegistry)).increment();
+        bh.consume(key);
     }
 
     @Benchmark
@@ -117,8 +122,9 @@ public class Comparison {
         // If hash collides, then we might be incrementing wrong meter.
         final int key = Objects.hash(dynamicValue, dynamicValue);
         getOrCreateMeter(cacheWithHash, key, k -> Counter.builder(Comparison.METER_NAME)
-                .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue)
+                .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue, STATIC_TAG, STATIC_VALUE)
                 .register(Metrics.globalRegistry)).increment();
+        bh.consume(key);
     }
 
     @Benchmark
@@ -127,8 +133,9 @@ public class Comparison {
         final FixedArgsCacheKey key = new FixedArgsCacheKey(dynamicValue, dynamicValue);
         getOrCreateMeter(cacheWithFixedArgsCustomKey, key, k -> Counter.builder(
                         Comparison.METER_NAME)
-                .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue)
+                .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue, STATIC_TAG, STATIC_VALUE)
                 .register(Metrics.globalRegistry)).increment();
+        bh.consume(key);
     }
 
     @Benchmark
@@ -138,18 +145,22 @@ public class Comparison {
         getOrCreateMeter(cacheWithNargsCustomKey, key,
                 k -> Counter.builder(
                                 Comparison.METER_NAME)
-                        .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue)
+                        .tags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue, STATIC_TAG, STATIC_VALUE)
                         .register(Metrics.globalRegistry)).increment();
+        bh.consume(key);
+    }
+
+    @Benchmark
+    public void recordUsingMeterProvider(Blackhole bh, DataProvider dataProvider) {
+        String dynamicValue = dataProvider.iterator.next();
+        counterProvider.withTags(TAG_KEY_1, dynamicValue, TAG_KEY_2, dynamicValue).increment();
     }
 
     private static <K, V> V getOrCreateMeter(Map<K, V> map, K key, Function<K, V> mappingFunction) {
-        // This is very important to avoid the sync blocks in computeIfAbsent of ConcurrentHasMaps. Try commenting the
-        // below and see how bad the performance goes if multiple threads access the map.
         final V value = map.get(key);
         if(value != null) {
             return value;
         }
-
 
         return map.computeIfAbsent(key, mappingFunction);
     }
